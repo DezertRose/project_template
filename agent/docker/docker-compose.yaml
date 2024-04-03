@@ -12,7 +12,7 @@ services:
       - 1883:1883
       - 9001:9001
     networks:
-      mqtt_network:
+      - mqtt_network
 
 
   fake_agent:
@@ -26,8 +26,9 @@ services:
       MQTT_TOPIC: "agent_data_topic"
       DELAY: 0.1
     networks:
-      mqtt_network:
+      - mqtt_network
 
 
 networks:
   mqtt_network:
+    driver: bridge

@@ -1,7 +1,8 @@
 import asyncio
 import json
-from typing import Set, Dict, List, Any
+from typing import Set, Dict, List, Any, Union
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Body
+
 from sqlalchemy import (
     create_engine,
     MetaData,
@@ -10,12 +11,12 @@ from sqlalchemy import (
     Integer,
     String,
     Float,
-    DateTime,
+    DateTime, update,
 )
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy.sql import select
 from datetime import datetime
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, Field, parse_obj_as, ConfigDict
 from config import (
     POSTGRES_HOST,
     POSTGRES_PORT,
@@ -30,8 +31,8 @@ app = FastAPI()
 DATABASE_URL = f"postgresql+psycopg2://{POSTGRES_USER}:{POSTGRES_PASSWORD}@{POSTGRES_HOST}:{POSTGRES_PORT}/{POSTGRES_DB}"
 engine = create_engine(DATABASE_URL)
 metadata = MetaData()
-# Define the ProcessedAgentData table
-processed_agent_data = Table(
+
+""" processed_agent_data = Table(
     "processed_agent_data",
     metadata,
     Column("id", Integer, primary_key=True, index=True),
@@ -43,12 +44,34 @@ processed_agent_data = Table(
     Column("latitude", Float),
     Column("longitude", Float),
     Column("timestamp", DateTime),
-)
+)"""
+
+Base = declarative_base()
+
+
+# Define SQLAlchemy ORM mapped class
+class ProcessedAgentDataDBM(Base):
+    __tablename__ = 'processed_agent_data'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    road_state = Column(String)
+    user_id = Column(Integer)
+    x = Column(Float)
+    y = Column(Float)
+    z = Column(Float)
+    latitude = Column(Float)
+    longitude = Column(Float)
+    timestamp = Column(DateTime)
+
+
+Base.metadata.create_all(engine)
 SessionLocal = sessionmaker(bind=engine)
 
 
 # SQLAlchemy model
 class ProcessedAgentDataInDB(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     road_state: str
     user_id: int
@@ -124,35 +147,93 @@ async def send_data_to_subscribers(user_id: int, data):
 # FastAPI CRUDL endpoints
 
 
-@app.post("/processed_agent_data/")
+@app.post("/processed_agent_data/",)
 async def create_processed_agent_data(data: List[ProcessedAgentData]):
     # Insert data to database
     # Send data to subscribers
-    pass
+    with SessionLocal() as ssl:
+        temp_data = [
+            ProcessedAgentDataDBM(
+                road_state=item.road_state,
+                user_id=item.agent_data.user_id,
+                x=item.agent_data.accelerometer.x,
+                y=item.agent_data.accelerometer.y,
+                z=item.agent_data.accelerometer.z,
+                latitude=item.agent_data.gps.latitude,
+                longitude=item.agent_data.gps.longitude,
+                timestamp=item.agent_data.timestamp,
+            ) for item in data
+            ]
+        
+        ssl.add_all(temp_data)
+        ssl.commit()
+
+        for sub_id in subscriptions:
+            await send_data_to_subscribers(sub_id, temp_data)
+
+        print("Success")
 
 
 @app.get(
     "/processed_agent_data/{processed_agent_data_id}",
-    response_model=ProcessedAgentDataInDB,
+    response_model=Union[ProcessedAgentDataInDB, None],
 )
 def read_processed_agent_data(processed_agent_data_id: int):
     # Get data by id
-    pass
+    with SessionLocal() as ssl:
+        get_rec = ssl.query(ProcessedAgentDataDBM).get(processed_agent_data_id)
+
+        if get_rec is None:
+            raise HTTPException(status_code=404, detail="Processed agent data not found")
+
+        return ProcessedAgentDataInDB.model_validate(get_rec)
 
 
 @app.get("/processed_agent_data/", response_model=list[ProcessedAgentDataInDB])
 def list_processed_agent_data():
     # Get list of data
-    pass
-
+    with SessionLocal() as ssl:
+        return ssl.query(ProcessedAgentDataDBM).all()
 
 @app.put(
     "/processed_agent_data/{processed_agent_data_id}",
     response_model=ProcessedAgentDataInDB,
 )
-def update_processed_agent_data(processed_agent_data_id: int, data: ProcessedAgentData):
+async def update_processed_agent_data(processed_agent_data_id: int, data: ProcessedAgentData):
     # Update data
-    pass
+    # Insert data to database
+    # Send data to subscribers
+    with SessionLocal() as ssl:
+        upd_data = ssl.query(ProcessedAgentDataDBM).get(processed_agent_data_id)
+        if upd_data is None:
+            raise HTTPException(status_code=404, detail="Processed agent data not found")
+
+        con_updated_data = ProcessedAgentDataDBM(
+            road_state=data.road_state,
+            user_id=data.agent_data.user_id,
+            x=data.agent_data.accelerometer.x,
+            y=data.agent_data.accelerometer.y,
+            z=data.agent_data.accelerometer.z,
+            latitude=data.agent_data.gps.latitude,
+            longitude=data.agent_data.gps.longitude,
+            timestamp=data.agent_data.timestamp,
+        )
+
+        upd_data.road_state = con_updated_data.road_state,
+        upd_data.user_id = con_updated_data.user_id,
+        upd_data.x = con_updated_data.x,
+        upd_data.y = con_updated_data.y,
+        upd_data.z = con_updated_data.z,
+        upd_data.latitude = con_updated_data.latitude,
+        upd_data.longitude = con_updated_data.longitude,
+        upd_data.timestamp = con_updated_data.timestamp,
+
+        ssl.commit()
+
+        for sub_id in subscriptions:
+            await send_data_to_subscribers(sub_id, upd_data)
+
+        return ProcessedAgentDataInDB.model_validate(upd_data)
 
 
 @app.delete(
@@ -161,8 +242,17 @@ def update_processed_agent_data(processed_agent_data_id: int, data: ProcessedAge
 )
 def delete_processed_agent_data(processed_agent_data_id: int):
     # Delete by id
-    pass
+    with SessionLocal() as ssl:
+        del_data = ssl.query(ProcessedAgentDataDBM).get(processed_agent_data_id)
+        if del_data is None:
+           raise HTTPException(status_code=404, detail="Processed agent data not found")
 
+        ssl.query(ProcessedAgentDataDBM).filter(ProcessedAgentDataDBM.id == processed_agent_data_id).delete()
+        ssl.commit()
+
+        return ProcessedAgentDataInDB.model_validate(del_data)
+    
+    
 
 if __name__ == "__main__":
     import uvicorn
